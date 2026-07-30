@@ -1,0 +1,139 @@
+[
+  {
+    "case_no": "TEST-2026-001",
+    "case_type": "民事案件",
+    "court_code": "beijing",
+    "court_name": "北京市海淀区人民法院",
+    "case_cause": "买卖合同纠纷",
+    "amount": 100000.0,
+    "claims": "判令被告向原告支付货款人民币100000元及逾期利息。",
+    "facts": "2024年1月，原被告签订买卖合同，原告依约供货，被告拒不付款。",
+    "plaintiff": {
+      "name": "测试原告甲",
+      "idcard": "110101199001011234",
+      "phone": "13800000001",
+      "address": "北京市海淀区测试路1号"
+    },
+    "defendant": {
+      "name": "测试被告乙",
+      "idcard": "110101199002022345",
+      "phone": "13900000002",
+      "address": "北京市朝阳区测试街2号"
+    },
+    "documents": [
+      {
+        "name": "民事起诉状",
+        "type": "起诉状",
+        "path": "documents/complaint.png"
+      },
+      {
+        "name": "原告身份证明",
+        "type": "身份证明",
+        "path": "documents/plaintiff_id.png"
+      },
+      {
+        "name": "被告身份证明",
+        "type": "身份证明",
+        "path": "documents/defendant_id.png"
+      },
+      {
+        "name": "买卖合同",
+        "type": "证据",
+        "path": "documents/evidence_contract.png"
+      },
+      {
+        "name": "收款凭证",
+        "type": "证据",
+        "path": "documents/evidence_receipt.png"
+      }
+    ]
+  },
+  {
+    "case_no": "TEST-2026-002",
+    "case_type": "民事案件",
+    "court_code": "beijing",
+    "court_name": "北京市朝阳区人民法院",
+    "case_cause": "民间借贷纠纷",
+    "amount": 50000.0,
+    "claims": "判令被告偿还借款本金50000元及利息。",
+    "facts": "2023年6月，被告因资金周转困难向原告借款5万元，承诺3个月内归还，至今未还。",
+    "plaintiff": {
+      "name": "测试原告丙",
+      "idcard": "110105198503033456",
+      "phone": "13800000003",
+      "address": "北京市朝阳区测试路3号"
+    },
+    "defendant": {
+      "name": "测试被告丁",
+      "idcard": "110105198604044567",
+      "phone": "13900000004",
+      "address": "北京市海淀区测试街4号"
+    },
+    "documents": [
+      {
+        "name": "民事起诉状",
+        "type": "起诉状",
+        "path": "documents/complaint.png"
+      },
+      {
+        "name": "原告身份证明",
+        "type": "身份证明",
+        "path": "documents/plaintiff_id.png"
+      },
+      {
+        "name": "借条",
+        "type": "证据",
+        "path": "documents/evidence_contract.png"
+      },
+      {
+        "name": "转账记录",
+        "type": "证据",
+        "path": "documents/evidence_receipt.png"
+      }
+    ]
+  },
+  {
+    "case_no": "TEST-2026-003",
+    "case_type": "民事案件",
+    "court_code": "beijing",
+    "court_name": "北京市丰台区人民法院",
+    "case_cause": "房屋租赁合同纠纷",
+    "amount": 20000.0,
+    "claims": "判令被告支付拖欠租金20000元并腾退房屋。",
+    "facts": "原被告签订房屋租赁合同，被告自2024年3月起拖欠租金，经催告仍未支付。",
+    "plaintiff": {
+      "name": "测试房东戊",
+      "idcard": "110106197507055678",
+      "phone": "13800000005",
+      "address": "北京市丰台区测试路5号"
+    },
+    "defendant": {
+      "name": "测试租客己",
+      "idcard": "110106198808086789",
+      "phone": "13900000006",
+      "address": "北京市丰台区测试街6号"
+    },
+    "documents": [
+      {
+        "name": "民事起诉状",
+        "type": "起诉状",
+        "path": "documents/complaint.png"
+      },
+      {
+        "name": "原告身份证明",
+        "type": "身份证明",
+        "path": "documents/plaintiff_id.png"
+      },
+      {
+        "name": "房屋租赁合同",
+        "type": "证据",
+        "path": "documents/evidence_contract.png"
+      },
+      {
+        "name": "租金催缴记录",
+        "type": "证据",
+        "path": "documents/evidence_receipt.png"
+      }
+    ]
+  }
+]

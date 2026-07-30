@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  filing-automation:
+    build: .
+    container_name: court-filing-bot
+    env_file:
+      - .env
+    volumes:
+      - ./documents:/app/documents
+      - ./screenshots:/app/screenshots
+      - ./logs:/app/logs
+      - ./results:/app/results
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G

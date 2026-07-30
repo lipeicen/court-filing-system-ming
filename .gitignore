@@ -1,0 +1,14 @@
+.env
+uploads/
+*.sql
+*.dump
+screenshots/
+logs/
+__pycache__/
+*.pyc
+*.log
+results/
+temp/
+.cache/
+.vscode/
+.idea/

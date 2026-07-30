@@ -1,0 +1,500 @@
+from loguru import logger
+from .base import CourtAdapter
+from utils.captcha_solver import CaptchaSolver
+import time, json, re
+from pathlib import Path
+from playwright.sync_api import Page, BrowserContext
+
+
+class BeijingCourtAdapter(CourtAdapter):
+    """人民法院在线服务网（北京）民事一审自动立案适配器"""
+
+    PROVINCE_ID = "110000"
+
+    @property
+    def court_name(self) -> str:
+        return "人民法院在线服务"
+
+    @property
+    def court_code(self) -> str:
+        return "beijing"
+
+    @property
+    def base_url(self) -> str:
+        return "https://zxfw.court.gov.cn"
+
+    def __init__(self):
+        self.save_dir = Path("screenshots/probe")
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.popup = None
+        self.main_page = None
+
+    def _wait(self, t=1.0):
+        time.sleep(t)
+
+    def _save_state(self, page: Page, name: str):
+        try:
+            html_path = self.save_dir / f"{name}.html"
+            png_path = self.save_dir / f"{name}.png"
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(page.content())
+            page.screenshot(path=str(png_path), full_page=True)
+            logger.info(f"saved state {name}")
+        except Exception as e:
+            logger.error(f"save state {name} failed: {e}")
+
+    def _click_text(self, page: Page, text: str, timeout=5000, exact=False) -> bool:
+        """优先使用 Playwright 文本选择器点击，失败再回退到 JS"""
+        for fn in [
+            lambda: page.get_by_text(text, exact=exact).click(timeout=timeout),
+            lambda: page.click(f"text={text}", timeout=timeout),
+            lambda: page.evaluate(
+                """(text) => {
+                    const all = document.querySelectorAll('*');
+                    for (const el of all) if (el.textContent && el.textContent.trim() === text) { el.click(); return true; }
+                    return false;
+                }""", text
+            ),
+        ]:
+            try:
+                fn()
+                self._wait(0.5)
+                return True
+            except Exception:
+                pass
+        return False
+
+    def _find_page_vue(self, page: Page, tag_name: str):
+        """在页面 Vue 组件树中查找指定名称的组件实例"""
+        return page.evaluate(
+            """(tagName) => {
+                const app = document.querySelector('uni-app');
+                if (!app) return {err: 'no uni-app'};
+                const root = app.__vue__;
+                function find(v) {
+                    if (!v) return null;
+                    const tag = v.$options && (v.$options.name || v.$options._componentTag || v.$options.__name);
+                    if (tag === tagName) return v;
+                    for (const c of v.$children || []) { const r = find(c); if (r) return r; }
+                    return null;
+                }
+                const comp = find(root);
+                return comp ? {found: true} : {err: 'not found'};
+            }""", tag_name
+        )
+
+    def _set_province_beijing(self, page: Page):
+        """在案件类型选择页把省份切到北京：直接操作 commonHeader 与 Vue 状态"""
+        logger.info("设置省份为北京")
+        page.evaluate(
+            """(provinceId) => {
+                const app = document.querySelector('uni-app').__vue__;
+                function find(v, tagName) {
+                    if (!v) return null;
+                    const tag = v.$options && (v.$options.name || v.$options._componentTag || v.$options.__name);
+                    if (tag === tagName) return v;
+                    for (const c of v.$children || []) { const r = find(c, tagName); if (r) return r; }
+                    return null;
+                }
+                // 1) 更新头部组件省份索引
+                const header = find(app, 'commonHeader');
+                if (header) {
+                    const idx = (header.provinces || []).indexOf(provinceId);
+                    header.currentAreaIndex = idx > 0 ? idx : 1;
+                    if (typeof header.updateHeaderStorage === 'function') header.updateHeaderStorage();
+                }
+                // 2) 同步案件类型页（如果有）
+                const pick = find(app, 'pagesWsla-pc-zxla-pick-case-type-index');
+                if (pick && typeof pick.getListData === 'function') {
+                    try { pick.getListData(); } catch (e) {}
+                }
+                uni.setStorageSync('provinceId', provinceId);
+                return 'done';
+            }""", self.PROVINCE_ID
+        )
+        self._wait(2.5)
+
+    def login(self, page: Page, credentials: dict, max_retry: int = 3) -> bool:
+        self.main_page = page
+        username = credentials.get("username", "")
+        password = credentials.get("password", "")
+        for attempt in range(1, max_retry + 1):
+            logger.info(f"login attempt {attempt}")
+            page.goto(f"{self.base_url}/zxfw/#/pagesGrxx/pc/login/index", wait_until="domcontentloaded")
+            self._wait(3)
+            self._click_text(page, "律师用户", timeout=3000)
+            self._wait(0.5)
+            self._click_text(page, "密码登录", timeout=3000)
+            self._wait(1)
+            try:
+                page.wait_for_selector("input[type='password']", timeout=5000)
+            except Exception:
+                self._click_text(page, "密码登录", timeout=3000)
+                self._wait(1)
+            inputs = page.query_selector_all(".uni-input-input")
+            if len(inputs) >= 2:
+                inputs[0].fill(username)
+                inputs[1].fill(password)
+            if len(inputs) >= 3:
+                try:
+                    imgs = page.query_selector_all("img")
+                    if imgs:
+                        imgs[0].screenshot(path=str(self.save_dir / "captcha.png"))
+                        with open(self.save_dir / "captcha.png", 'rb') as f:
+                            code = CaptchaSolver().solve_image_captcha(f.read())
+                        inputs[2].fill(code)
+                except Exception as e:
+                    logger.warning(f"captcha handling skipped: {e}")
+            for sel in [".fd-login-btn", "button:has-text('登录')", ".login-btn"]:
+                try:
+                    page.click(sel, timeout=3000)
+                    break
+                except Exception:
+                    pass
+            self._wait(5)
+            content = page.content()
+            if "在线立案" in content and "密码登录" not in content:
+                logger.info("login ok")
+                self._save_state(page, "login_success")
+                return True
+            logger.warning(f"login failed, url {page.url}")
+            self._save_state(page, f"login_failed_{attempt}")
+        return False
+
+    def navigate_to_filing(self, page: Page) -> Page:
+        """导航到民事一审立案表单页面，返回新打开的页面实例"""
+        logger.info("导航到民事一审立案页面")
+        self._click_text(page, "在线立案")
+        self._wait(3)
+        self._click_text(page, "我要立案")
+        self._wait(3)
+        self._save_state(page, "pick_case_type")
+
+        self._set_province_beijing(page)
+        self._save_state(page, "pick_case_type_after_beijing")
+
+        # 点击“民事一审”会在新窗口打开 wsla/index
+        if not self._click_text(page, "民事一审", timeout=10000, exact=True):
+            raise Exception("无法点击民事一审")
+
+        # 等待新页面打开
+        new_page = None
+        try:
+            new_page = page.context.wait_for_event("page", timeout=15000)
+            logger.info(f"new page opened: {new_page.url}")
+        except Exception as e:
+            logger.warning(f"wait_for_event page timeout: {e}")
+            for _ in range(15):
+                self._wait(1)
+                for pg in page.context.pages:
+                    if "wsla/index" in pg.url:
+                        new_page = pg
+                        break
+                if new_page and not new_page.is_closed():
+                    break
+
+        if not new_page:
+            raise Exception("民事一审窗口未打开")
+
+        # 等待页面加载到选择受理法院
+        try:
+            new_page.wait_for_selector("text=选择受理法院", timeout=30000)
+        except Exception as e:
+            logger.warning(f"等待选择受理法院超时: {e}")
+
+        self.popup = new_page
+        self._save_state(new_page, "civil_first")
+        return new_page
+
+    def fill_case_form(self, page: Page, case_data: dict) -> None:
+        logger.info("开始填写案件信息...")
+        self._select_court(page, case_data)
+        self._agree_notice(page)
+        self._select_case_cause(page, case_data)
+        self._save_state(page, "form_filling")
+
+    def _find_vue_component(self, page: Page, tag_name: str):
+        """在页面 Vue 树中查找组件实例"""
+        return page.evaluate(
+            """(tagName) => {
+                const app = document.querySelector('uni-app');
+                if (!app || !app.__vue__) return {err: 'no vue'};
+                function find(v) {
+                    if (!v) return null;
+                    const tag = v.$options && (v.$options.name || v.$options._componentTag || v.$options.__name);
+                    if (tag === tagName) return v;
+                    for (const c of v.$children || []) { const r = find(c); if (r) return r; }
+                    return null;
+                }
+                const comp = find(app.__vue__);
+                return comp ? {found: true} : {err: 'not found'};
+            }""", tag_name
+        )
+
+    def _set_xzfy_beijing(self, page: Page):
+        """在 wsla/index 选择受理法院页，把 xzfy 组件切到北京"""
+        logger.info("切换受理法院页省份为北京")
+        page.evaluate(
+            """(provinceId) => {
+                function find(v, tagName) {
+                    if (!v) return null;
+                    const tag = v.$options && (v.$options.name || v.$options._componentTag || v.$options.__name);
+                    if (tag === tagName) return v;
+                    for (const c of v.$children || []) { const r = find(c, tagName); if (r) return r; }
+                    return null;
+                }
+                const app = document.querySelector('uni-app').__vue__;
+                // 同步 commonHeader 省份索引
+                const header = find(app, 'commonHeader');
+                if (header) {
+                    const idx = (header.provinces || []).indexOf(provinceId);
+                    header.currentAreaIndex = idx > 0 ? idx : 1;
+                }
+                // 触发 xzfy 城市列表刷新
+                const x = find(app, 'xzfy');
+                if (!x) return {err: 'no xzfy'};
+                x.value = provinceId;
+                x.citymc = '北京市';
+                x.currentIndex = 0;
+                x.fyList = [];
+                if (typeof x.getCityList === 'function') x.getCityList();
+                return 'ok';
+            }""", self.PROVINCE_ID
+        )
+        self._wait(4)
+
+    def _click_court_card(self, page: Page, court_name: str) -> bool:
+        """点击法院卡片（radio-label 结构）"""
+        if not court_name:
+            return False
+        # 先尝试真实点击 label/span 文本
+        for sel in [
+            f"uni-label:has-text('{court_name}')",
+            f"text={court_name}",
+        ]:
+            try:
+                page.locator(sel).first.click(timeout=5000)
+                self._wait(0.5)
+                return True
+            except Exception:
+                pass
+        # 兜底：JS 遍历点击
+        clicked = page.evaluate(
+            """(name) => {
+                const all = document.querySelectorAll('uni-label, uni-view, uni-text, label, span');
+                for (const el of all) {
+                    const txt = el.textContent && el.textContent.trim();
+                    if (txt === name) {
+                        el.click();
+                        // 如果点击的是文本节点，尝试找到父 label 再点击一次
+                        let p = el;
+                        while (p && p !== document.body) {
+                            if (p.tagName && p.tagName.toLowerCase() === 'uni-label') { p.click(); return true; }
+                            p = p.parentElement;
+                        }
+                        return true;
+                    }
+                }
+                return false;
+            }""", court_name
+        )
+        self._wait(0.5)
+        return bool(clicked)
+
+    def _select_court(self, page: Page, case_data: dict):
+        logger.info("选择受理法院...")
+        try:
+            page.wait_for_selector("text=选择受理法院", timeout=30000)
+        except Exception:
+            pass
+        self._save_state(page, "court_select")
+
+        # 关键：先切换到北京省份
+        self._set_xzfy_beijing(page)
+        self._save_state(page, "court_select_beijing")
+
+        target_court = case_data.get("court_name", "")
+        if target_court:
+            if not self._click_court_card(page, target_court):
+                logger.warning(f"未点击到指定法院: {target_court}")
+        else:
+            # 默认选择第一个基层法院（排除中级/高级/最高/海事/知识产权/金融/互联网/铁路）
+            selected = page.evaluate(
+                """() => {
+                    function findXzfy(v) {
+                        if (!v) return null;
+                        const tag = v.$options && (v.$options.name || v.$options._componentTag || v.$options.__name);
+                        if (tag === 'xzfy') return v;
+                        for (const c of v.$children || []) { const r = findXzfy(c); if (r) return r; }
+                        return null;
+                    }
+                    const x = findXzfy(document.querySelector('uni-app').__vue__);
+                    if (x && x.fyList) {
+                        for (const fy of x.fyList) {
+                            const txt = fy.text || '';
+                            if (/高级|最高|中级|海事|知识产权|金融|互联网|铁路/.test(txt)) continue;
+                            if (txt.includes('人民法院')) {
+                                x.fyId = fy.value;
+                                x.fymc = txt;
+                                if (typeof x.changeFy === 'function') x.changeFy();
+                                return txt;
+                            }
+                        }
+                    }
+                    return null;
+                }"""
+            )
+            logger.info(f"auto selected court: {selected}")
+            self._wait(0.5)
+
+        self._save_state(page, "after_court_selected")
+
+        # 选择“本人申请”
+        self._click_text(page, "本人申请", timeout=5000)
+        self._wait(0.5)
+
+        # 关闭可能弹出的提示层（综治中心等）
+        for btn_text in ["关闭", "我知道了", "不再提醒"]:
+            self._click_text(page, btn_text, timeout=3000)
+        self._wait(0.5)
+
+        # 点击下一步
+        if not self._click_text(page, "下一步", timeout=5000):
+            try:
+                page.click("uni-button[type='primary']", timeout=3000)
+            except Exception as e:
+                logger.warning(f"下一步点击失败: {e}")
+        self._wait(3)
+        self._save_state(page, "after_court_next")
+
+    def _agree_notice(self, page: Page):
+        logger.info("阅读须知...")
+        try:
+            page.wait_for_selector("text=立案须知", timeout=10000)
+        except Exception:
+            pass
+        self._save_state(page, "notice")
+        # 勾选“已阅读同意立案须知内容”
+        for agree_text in ["已阅读同意立案须知内容", "已阅读同意", "已阅读并同意"]:
+            try:
+                agree = page.locator(f"text={agree_text}")
+                if agree.count():
+                    agree.click()
+                    self._wait(0.5)
+                    break
+            except Exception:
+                pass
+        else:
+            try:
+                cb = page.locator(".uni-checkbox-input").first
+                if cb.count():
+                    cb.click()
+                    self._wait(0.5)
+            except Exception as e:
+                logger.warning(f"勾选同意失败: {e}")
+
+        # 点击下一步，并处理连续弹窗
+        try:
+            page.locator("uni-button").filter(has_text="下一步").click(timeout=5000)
+        except Exception:
+            self._click_text(page, "下一步", timeout=5000)
+        self._wait(2)
+        self._save_state(page, "notice_next")
+
+        # 处理要素式/智能识别弹窗
+        for i in range(3):
+            handled = False
+            for btn in ["不选择要素式立案", "不体验智能识别要素式立案服务", "已准备诉状", "未准备诉状"]:
+                try:
+                    loc = page.locator("uni-button").filter(has_text=btn)
+                    if loc.count() and loc.is_visible():
+                        loc.click(timeout=3000)
+                        logger.info(f"弹窗按钮: {btn}")
+                        handled = True
+                        self._wait(3)
+                        break
+                except Exception:
+                    continue
+            if not handled:
+                break
+            self._save_state(page, f"notice_popup_{i}")
+
+        # 若仍停留在须知页面，再次点击下一步
+        if (self._has_text(page, "立案须知") and self._has_text(page, "下一步")
+                and not self._has_text(page, "选择立案案由")):
+            try:
+                page.locator("uni-button").filter(has_text="下一步").click(timeout=5000)
+            except Exception:
+                self._click_text(page, "下一步", timeout=5000)
+            self._wait(2)
+        self._save_state(page, "notice_after_popup")
+
+    def _has_text(self, page: Page, text: str) -> bool:
+        try:
+            return page.locator(f"text={text}").count() > 0
+        except Exception:
+            return False
+
+    def _select_case_cause(self, page: Page, case_data: dict):
+        logger.info("选择立案案由...")
+        try:
+            page.wait_for_selector("text=选择立案案由", timeout=10000)
+        except Exception:
+            pass
+        self._save_state(page, "case_cause")
+        try:
+            # 优先使用 case_data 中的案由关键词
+            cause_keyword = case_data.get("metadata", {}).get("case_cause", "") or "纠纷"
+            leaves = page.query_selector_all(".fd-tree-node, .uni-tree-node, .leaf-node, .uni-list-item")
+            selected = None
+            for leaf in leaves:
+                txt = leaf.inner_text()
+                if txt and cause_keyword in txt:
+                    leaf.click()
+                    selected = txt
+                    break
+            if not selected and leaves:
+                leaves[0].click()
+                selected = leaves[0].inner_text()
+            logger.info(f"selected case cause: {selected}")
+            self._wait(1)
+            self._click_text(page, "下一步", timeout=5000)
+            self._wait(2)
+        except Exception as e:
+            logger.warning(f"选择案由失败: {e}")
+
+    def upload_documents(self, page: Page, documents: list) -> None:
+        logger.info("上传案件材料...")
+        try:
+            page.wait_for_selector("text=上传诉讼材料", timeout=10000)
+        except Exception:
+            pass
+        self._save_state(page, "upload")
+        # TODO: 根据 material categories 实现实际上传
+
+    def submit_case(self, page: Page) -> dict:
+        logger.info("提交立案申请...")
+        try:
+            page.wait_for_selector("text=完善案件信息", timeout=10000)
+        except Exception:
+            pass
+        self._save_state(page, "submit")
+        return {
+            "success": False,
+            "case_id": "",
+            "message": "流程已导航到完善案件信息步骤，未实际提交",
+            "court_code": self.court_code,
+            "court_name": self.court_name
+        }
+
+    def check_status(self, page: Page, case_id: str) -> dict:
+        return {
+            "case_id": case_id,
+            "status": "未实现",
+            "update_time": "",
+            "court_code": self.court_code,
+            "court_name": self.court_name
+        }
+
+    def _log_step(self, msg: str):
+        logger.info(msg)
