@@ -4,11 +4,13 @@ uploads/
 *.dump
 screenshots/
 logs/
+results/
+outputs/
 __pycache__/
 *.pyc
 *.log
-results/
 temp/
 .cache/
 .vscode/
 .idea/
+documents/cases/
