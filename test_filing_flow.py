@@ -91,8 +91,12 @@ def save_report(report, suffix=''):
 
 
 def _validate_state() -> bool:
-    """打开首页验证 storage_state 是否仍有效"""
+    """打开首页验证 storage_state 是否仍有效，且文件保存时间在 5 分钟内"""
     if not Path(STATE_PATH).exists():
+        return False
+    # 服务端登录态容易过期，超过 5 分钟强制刷新
+    if time.time() - Path(STATE_PATH).stat().st_mtime > 10 * 60:
+        logger.warning(f"storage_state 超过 5 分钟，强制重新登录")
         return False
     adapter = BeijingCourtAdapter()
     with sync_playwright() as p:
@@ -175,6 +179,11 @@ def run_case(browser, raw, index):
         res['status'] = '异常'
         res['message'] = str(e)
     finally:
+        try:
+            context.storage_state(path=STATE_PATH)
+            logger.info(f"已保存当前会话状态: {STATE_PATH}")
+        except Exception as e:
+            logger.warning(f"保存会话状态失败: {e}")
         context.close()
     return res
 
