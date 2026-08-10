@@ -533,6 +533,33 @@ class BeijingCourtAdapter(CourtAdapter):
         except Exception:
             return False
 
+    def _get_active_step_text(self, page: Page) -> str:
+        """获取顶部进度条当前高亮步骤文本"""
+        try:
+            active = page.locator('.fd-com-step-item--active, .fd-step-item--active, .step-item--active, .active').first
+            if active.count():
+                return (active.inner_text() or '').strip()[:20]
+        except Exception:
+            pass
+        return ""
+
+    def _is_on_success_page(self, page: Page) -> bool:
+        """判断是否真的到了提交成功页（而不是进度条标签）"""
+        content = page.content()
+        if "提交成功" not in content:
+            return False
+        if page.locator("button:has-text('上一步'), uni-button:has-text('上一步')").count() > 0:
+            return False
+        if page.locator("button:has-text('下一步'), uni-button:has-text('下一步')").count() > 0:
+            return False
+        if page.locator("button:has-text('返回'), uni-button:has-text('返回'), button:has-text('返回首页'), uni-button:has-text('返回首页'), button:has-text('查看案件'), uni-button:has-text('查看案件')").count() > 0:
+            return True
+        # 兜底：顶部进度条当前步骤为“提交成功”且无返回按钮时也算成功
+        active = self._get_active_step_text(page)
+        if active == "提交成功":
+            return True
+        return False
+
     def _select_case_cause(self, page: Page, case_data: dict):
         logger.info("选择立案案由/法院...")
         # 1) 处理“选择立案方式”弹层/页面(未准备诉状 / 已准备诉状)
@@ -717,19 +744,35 @@ class BeijingCourtAdapter(CourtAdapter):
             if not paths:
                 logger.info(f"skip button {i} ({bucket_key}): no documents")
                 continue
-            doc_path = paths[0]
-            if not os.path.exists(doc_path):
-                logger.warning(f"doc not found: {doc_path}")
+            if not any(os.path.exists(p) for p in paths):
+                logger.warning(f"skip button {i} ({bucket_key}): no existing documents")
                 continue
             try:
-                # Use index-based click because button_map came from querySelectorAll order
+                # Click the outer add button of this section. The picker component has a
+                # nested .fd-btn-add element, so `.fd-btn-add` selectors would click the
+                # wrong section (off-by-one). We target the outer container.
                 btn = page.locator(".fd-file-container.fd-btn-add").nth(i)
-                with page.expect_event("filechooser", timeout=5000) as fc_info:
-                    btn.click(timeout=3000)
-                fc = fc_info.value
-                fc.set_files(doc_path)
-                logger.info(f"uploaded {doc_path} to section {title}")
-                self._wait(1.5)
+                for doc_path in paths:
+                    if not os.path.exists(doc_path):
+                        logger.warning(f"doc not found: {doc_path}")
+                        continue
+                    try:
+                        with page.expect_event("filechooser", timeout=5000) as fc_info:
+                            btn.click(timeout=3000)
+                        fc = fc_info.value
+                        fc.set_files(doc_path)
+                        logger.info(f"selected {doc_path} for section {title}")
+                    except Exception as e:
+                        logger.warning(f"filechooser failed for {title} / {doc_path}: {e}")
+                    # Wait for upload network request and UI update
+                    self._wait(3)
+                # Verify expected file names appear in this section
+                expected_names = [os.path.basename(p) for p in paths if os.path.exists(p)]
+                shown_titles = page.locator('.fd-com-upload-grid-container .fd-file-container:not(.fd-btn-add)').evaluate_all(
+                    "elements => elements.map(e => e.getAttribute('title') || '')"
+                )
+                shown_names = [t.split('-')[-1] for t in shown_titles if t]
+                logger.info(f"section {title} expected {expected_names}, shown {shown_names}")
             except Exception as e:
                 logger.warning(f"add button {i} ({title}) upload failed: {e}")
 
@@ -1582,11 +1625,13 @@ class BeijingCourtAdapter(CourtAdapter):
         message = "已走到预览和提交步骤，但未触发真实提交"
         try:
             # 3) 尝试点击提交按钮（优先使用 JS，避免自定义元素选择器问题）
+            # 在“预览和提交”页，按钮通常是“下一步”，点击后进入确认弹窗
             result = page.evaluate("""() => {
                 const btns = document.querySelectorAll('uni-button, button, .uni-modal__btn');
                 for (const b of btns) {
                     const t = (b.innerText || '').trim();
                     if (t === '提交' || t === '确认提交' || t === '立即提交') { b.click(); return 'clicked ' + t; }
+                    if (t === '下一步') { b.click(); return 'clicked next'; }
                 }
                 return null;
             }""")
@@ -1594,14 +1639,34 @@ class BeijingCourtAdapter(CourtAdapter):
                 logger.info(f"clicked {result}")
                 submitted = True
                 self._wait(5)
+            # 3.5) 如果出现确认弹窗，点击“确认提交”或“确定”
+            if submitted:
+                confirm_res = page.evaluate("""() => {
+                    const btns = document.querySelectorAll('uni-button, button, .uni-modal__btn, .uni-actionsheet__cell');
+                    for (const b of btns) {
+                        const t = (b.innerText || '').trim();
+                        if (t === '确认提交' || t === '确定' || t === '确认' || t === 'OK') { b.click(); return 'clicked ' + t; }
+                    }
+                    return null;
+                }""")
+                if confirm_res:
+                    logger.info(f"confirmation {confirm_res}")
+                    self._wait(8)
 
             # 4) 处理先行调解弹窗
             self._handle_mediation_dialog(page)
 
-            # 5) 如果提交后出现成功页，直接返回
-            if self._has_text(page, "提交成功"):
+            # 5) 校验是否真正进入成功页，避免停留在“预览和提交”或被打回“上传诉讼材料”
+            if self._is_on_success_page(page):
                 self._save_state(page, "submitted_success")
                 return {"success": True, "case_id": "", "message": "立案申请已提交成功"}
+
+            # 5.5) 如果提交后被校验打回，当前步骤会回到上传/完善/预览，不视为成功
+            active = self._get_active_step_text(page)
+            if active in ('上传诉讼材料', '完善案件信息', '预览和提交'):
+                logger.warning(f"提交未通过校验，当前步骤: {active}")
+                self._save_state(page, "submit_validation_failed")
+                return {"success": False, "case_id": "", "message": f"提交未通过校验，停留在 {active}"}
 
             # 5) 处理手机验证码（目前只检测，不填写真实验证码）
             if self._has_verification_dialog(page):
@@ -1617,13 +1682,17 @@ class BeijingCourtAdapter(CourtAdapter):
                 m = re.search(r'流水号[：:]\s*([A-Za-z0-9\-]+)', content)
             if m:
                 case_id = m.group(1)
-            message = "已提交立案申请" if submitted else "未找到提交按钮，停留在预览页面"
+            if not submitted:
+                message = "未找到提交按钮，停留在预览页面"
+                self._save_state(page, "not_submitted")
+                return {"success": False, "case_id": case_id, "message": message}
+            message = "已触发提交，但未能确认成功页"
         except Exception as e:
             logger.warning(f"提交时异常: {e}")
             message = f"提交异常: {e}"
 
-        self._save_state(page, "submitted")
-        return {"success": submitted, "case_id": case_id, "message": message}
+        self._save_state(page, "submitted_unconfirmed")
+        return {"success": False, "case_id": case_id, "message": message}
 
     def _handle_mediation_dialog(self, page: Page) -> bool:
         """处理先行调解弹窗：默认不同意"""

@@ -24,27 +24,32 @@
       {
         "name": "民事起诉状",
         "type": "起诉状",
-        "path": "documents/complaint.png"
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\complaint.pdf"
       },
       {
         "name": "原告身份证明",
         "type": "身份证明",
-        "path": "documents/plaintiff_id.png"
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\plaintiff_id.png"
       },
       {
         "name": "被告身份证明",
         "type": "身份证明",
-        "path": "documents/defendant_id.png"
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\defendant_id.png"
       },
       {
-        "name": "买卖合同",
+        "name": "证据目录",
         "type": "证据",
-        "path": "documents/evidence_contract.png"
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\evidence_catalog.pdf"
       },
       {
-        "name": "收款凭证",
-        "type": "证据",
-        "path": "documents/evidence_receipt.png"
+        "name": "授权委托书",
+        "type": "委托书",
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\authorization.pdf"
+      },
+      {
+        "name": "送达地址确认书",
+        "type": "送达地址确认书",
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\service_address.pdf"
       }
     ]
   },
@@ -73,22 +78,32 @@
       {
         "name": "民事起诉状",
         "type": "起诉状",
-        "path": "documents/complaint.png"
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\complaint.pdf"
       },
       {
         "name": "原告身份证明",
         "type": "身份证明",
-        "path": "documents/plaintiff_id.png"
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\plaintiff_id.png"
       },
       {
-        "name": "借条",
-        "type": "证据",
-        "path": "documents/evidence_contract.png"
+        "name": "被告身份证明",
+        "type": "身份证明",
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\defendant_id.png"
       },
       {
-        "name": "转账记录",
+        "name": "证据目录",
         "type": "证据",
-        "path": "documents/evidence_receipt.png"
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\evidence_catalog.pdf"
+      },
+      {
+        "name": "授权委托书",
+        "type": "委托书",
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\authorization.pdf"
+      },
+      {
+        "name": "送达地址确认书",
+        "type": "送达地址确认书",
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\service_address.pdf"
       }
     ]
   },
@@ -117,22 +132,32 @@
       {
         "name": "民事起诉状",
         "type": "起诉状",
-        "path": "documents/complaint.png"
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\complaint.pdf"
       },
       {
         "name": "原告身份证明",
         "type": "身份证明",
-        "path": "documents/plaintiff_id.png"
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\plaintiff_id.png"
       },
       {
-        "name": "房屋租赁合同",
-        "type": "证据",
-        "path": "documents/evidence_contract.png"
+        "name": "被告身份证明",
+        "type": "身份证明",
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\defendant_id.png"
       },
       {
-        "name": "租金催缴记录",
+        "name": "证据目录",
         "type": "证据",
-        "path": "documents/evidence_receipt.png"
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\evidence_catalog.pdf"
+      },
+      {
+        "name": "授权委托书",
+        "type": "委托书",
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\authorization.pdf"
+      },
+      {
+        "name": "送达地址确认书",
+        "type": "送达地址确认书",
+        "path": "C:\\Users\\Administrator\\Desktop\\法院自动立案工具方案\\documents\\service_address.pdf"
       }
     ]
   }
