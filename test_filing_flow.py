@@ -21,8 +21,47 @@ DB_CONFIG = {
     'user': 'root',
     'password': 'lijiayu123',
     'database': 'court_filing_civil_test',
+    'port': int(os.getenv('DB_PORT', 3306)),
     'charset': 'utf8mb4',
 }
+
+
+def load_config():
+    """从 system_config 表加载配置，环境变量优先。"""
+    defaults = {
+        'BEIJING_COURT_USERNAME': '',
+        'BEIJING_COURT_PASSWORD': '',
+        'DEFAULT_COURT_NAME': '北京市海淀区人民法院',
+        'DEFAULT_COURT_CODE': 'beijing',
+        'DEFAULT_CASE_REASON': '买卖合同纠纷',
+        'DEFAULT_CASE_TYPE': '民事案件',
+        'COURT_BASE_URL': 'https://zxfw.court.gov.cn',
+        'DRY_RUN_DEFAULT': 'false',
+        'STATE_MAX_AGE_MINUTES': '10',
+    }
+    if not pymysql:
+        return defaults
+    try:
+        conn = pymysql.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        cursor.execute("SELECT config_key, config_value FROM system_config")
+        db_cfg = {row[0]: row[1] or '' for row in cursor.fetchall()}
+        conn.close()
+    except Exception as e:
+        logger.warning(f"读取 system_config 失败，使用默认值: {e}")
+        db_cfg = {}
+    cfg = defaults.copy()
+    cfg.update({k: v for k, v in db_cfg.items() if k in defaults})
+    # 环境变量覆盖
+    for k in defaults:
+        env_val = os.getenv(k)
+        if env_val is not None:
+            cfg[k] = env_val
+    return cfg
+
+
+SYS_CONFIG = load_config()
+
 
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -91,10 +130,10 @@ def load_cases_from_db(limit=10):
         cases_map[case_id] = {
             'case_no': row['case_no'] or '',
             'case_name': row['case_name'] or '',
-            'case_type': row.get('case_type') or '民事案件',
-            'court_code': row.get('court_code') or 'beijing',
-            'court_name': row.get('court_name') or '北京市海淀区人民法院',
-            'case_cause': row.get('case_reason') or '买卖合同纠纷',
+            'case_type': row.get('case_type') or SYS_CONFIG.get('DEFAULT_CASE_TYPE', '民事案件'),
+            'court_code': row.get('court_code') or SYS_CONFIG.get('DEFAULT_COURT_CODE', 'beijing'),
+            'court_name': row.get('court_name') or SYS_CONFIG.get('DEFAULT_COURT_NAME', '北京市海淀区人民法院'),
+            'case_cause': row.get('case_reason') or SYS_CONFIG.get('DEFAULT_CASE_REASON', '买卖合同纠纷'),
             'amount': float(row['amount']) if row.get('amount') else 0.0,
             'claims': row.get('claims') or '',
             'facts': row.get('facts') or '',
@@ -178,8 +217,9 @@ def _validate_state() -> bool:
     if not Path(STATE_PATH).exists():
         return False
     # 服务端登录态容易过期，超过 5 分钟强制刷新
-    if time.time() - Path(STATE_PATH).stat().st_mtime > 10 * 60:
-        logger.warning(f"storage_state 超过 5 分钟，强制重新登录")
+    max_age = int(SYS_CONFIG.get('STATE_MAX_AGE_MINUTES', '10')) * 60
+    if time.time() - Path(STATE_PATH).stat().st_mtime > max_age:
+        logger.warning(f"storage_state 超过 {SYS_CONFIG.get('STATE_MAX_AGE_MINUTES', '10')} 分钟，强制重新登录")
         return False
     adapter = BeijingCourtAdapter()
     with sync_playwright() as p:
@@ -209,8 +249,8 @@ def prepare_login_state():
         return
     adapter = BeijingCourtAdapter()
     credentials = {
-        'username': os.getenv('BEIJING_COURT_USERNAME', ''),
-        'password': os.getenv('BEIJING_COURT_PASSWORD', '')
+        'username': SYS_CONFIG.get('BEIJING_COURT_USERNAME', ''),
+        'password': SYS_CONFIG.get('BEIJING_COURT_PASSWORD', '')
     }
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
@@ -252,7 +292,7 @@ def run_case(browser, raw, index):
         # 填写当事人信息并提交
         adapter.fill_party_form(popup, case_info.to_dict())
         adapter.complete_case_info_and_preview(popup, case_info.to_dict())
-        dry_run = os.getenv('COURT_FILING_DRY_RUN', 'false').lower() in ('true', '1', 'yes')
+        dry_run = os.getenv('COURT_FILING_DRY_RUN', SYS_CONFIG.get('DRY_RUN_DEFAULT', 'false')).lower() in ('true', '1', 'yes')
         submit = adapter.submit_case(popup, case_info.to_dict(), dry_run=dry_run)
         if dry_run:
             res['status'] = submit.get('success') and '待提交' or '已驳回'
