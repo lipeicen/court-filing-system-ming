@@ -1016,7 +1016,7 @@ class BeijingCourtAdapter(CourtAdapter):
                     tree.click(timeout=5000)
                     self._wait(0.8)
                     chosen_text = page.evaluate(
-                        """(value) => {
+                        r"""(value) => {
                             function isVisible(el) { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }
                             const popups = Array.from(document.querySelectorAll('.uni-data-tree-popup, .uni-select-popup, .uni-picker-container, .uni-popup, .uni-list, .uni-data-pickerview, .uni-picker')).filter(isVisible);
                             let best = null, bestText = '';
@@ -1102,7 +1102,7 @@ class BeijingCourtAdapter(CourtAdapter):
 
 
     def _js_click_section_button(self, page: Page, section_title: str, btn_text: str) -> dict:
-        return page.evaluate("""(args) => {
+        return page.evaluate(r"""(args) => {
             const sectionTitle = args.sectionTitle, btnText = args.btnText;
             function isVisible(el) { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }
             const all = Array.from(document.querySelectorAll('uni-section, .uni-section, section, uni-view, div')).filter(isVisible);
