@@ -677,43 +677,36 @@ class BeijingCourtAdapter(CourtAdapter):
 
         # Map documents to buckets by category keywords (documents come from CaseDocument.to_dict -> 'type')
         category_map = {
-            '起诉状': ['起诉状', '起诉材料', '材料信息'],
+            '起诉状': ['起诉状', '起诉材料'],
             '身份证明': ['身份证明', '当事人身份证明'],
             '证据': ['证据', '证据目录'],
             '委托书': ['委托', '代理人', '授权'],
             '送达地址确认书': ['送达'],
-            '其他': ['其他'],
+            '其他材料': ['其他'],
         }
         buckets = {}
         for doc in documents:
-            path = doc.get('path') if isinstance(doc, dict) else doc.path
+            doc_path = doc.get('path') if isinstance(doc, dict) else doc.path
             dtype = (doc.get('type') if isinstance(doc, dict) else getattr(doc, 'doc_type', '')) or ''
             matched = False
             for cat, kws in category_map.items():
                 if any(k in dtype for k in kws):
-                    buckets.setdefault(cat, []).append(path)
+                    buckets.setdefault(cat, []).append(doc_path)
                     matched = True
                     break
             if not matched:
-                buckets.setdefault('其他', []).append(path)
+                buckets.setdefault('其他材料', []).append(doc_path)
         logger.info(f"document buckets: {list(buckets.keys())}")
 
         # Use in-page JS to map each add button to its section title via DOM ancestors
         button_map = page.evaluate("""() => {
             const out = [];
-            const btns = document.querySelectorAll('.fd-file-container.fd-btn-add');
-            for (const btn of btns) {
-                let cur = btn.parentElement;
-                let title = '';
-                for (let d = 0; d < 12; d++) {
-                    if (!cur) break;
-                    const titleEl = cur.querySelector('.uni-section__content-title');
-                    if (titleEl) {
-                        title = (titleEl.textContent || '').trim();
-                        break;
-                    }
-                    cur = cur.parentElement;
-                }
+            const sections = document.querySelectorAll('.uni-section');
+            for (const sec of sections) {
+                const titleEl = sec.querySelector('.uni-section__content-title');
+                const title = titleEl ? (titleEl.textContent || '').trim() : '';
+                const btn = sec.querySelector('.fd-file-container.fd-btn-add, .fd-btn-add');
+                if (!btn) continue;
                 const rect = btn.getBoundingClientRect();
                 out.push({title, y: rect.y + rect.height/2, h: rect.height});
             }
@@ -721,41 +714,42 @@ class BeijingCourtAdapter(CourtAdapter):
         }""")
         logger.info(f"button_map: {button_map}")
 
+        # Fallback: 未准备诉状页面没有"起诉状"按钮，把起诉状文件归到"其他材料"
+        if not any(('起诉状' in info['title'] or '诉状' in info['title']) for info in button_map):
+            if '起诉状' in buckets:
+                buckets.setdefault('其他材料', []).extend(buckets.pop('起诉状'))
+                logger.info("页面无起诉状按钮，将起诉状归入其他材料")
+
         for i, info in enumerate(button_map):
             title = info['title']
             logger.info(f"button {i}: section '{title}'")
             bucket_key = None
-            if '起诉状' in title or '材料信息' in title or '诉状' in title:
-                bucket_key = '起诉状'
-            elif '身份证明' in title:
+            if '身份证明' in title:
                 bucket_key = '身份证明'
-            elif '委托' in title:
+            elif '委托' in title or '代理' in title:
                 bucket_key = '委托书'
             elif '证据' in title:
                 bucket_key = '证据'
             elif '送达' in title:
                 bucket_key = '送达地址确认书'
-            elif '其他' in title:
-                bucket_key = '其他'
+            elif '其他' in title or '材料信息' in title:
+                bucket_key = '其他材料'
             else:
-                bucket_key = '其他'
+                bucket_key = '其他材料'
 
             paths = buckets.get(bucket_key, [])
             if not paths:
                 logger.info(f"skip button {i} ({bucket_key}): no documents")
                 continue
-            if not any(os.path.exists(p) for p in paths):
+            existing_paths = [p for p in paths if os.path.exists(p)]
+            if not existing_paths:
                 logger.warning(f"skip button {i} ({bucket_key}): no existing documents")
                 continue
             try:
-                # Click the outer add button of this section. The picker component has a
-                # nested .fd-btn-add element, so `.fd-btn-add` selectors would click the
-                # wrong section (off-by-one). We target the outer container.
-                btn = page.locator(".fd-file-container.fd-btn-add").nth(i)
-                for doc_path in paths:
-                    if not os.path.exists(doc_path):
-                        logger.warning(f"doc not found: {doc_path}")
-                        continue
+                # Find the section container and click its add button
+                section = page.locator('.uni-section').filter(has_text=title).first
+                btn = section.locator('.fd-file-container.fd-btn-add, .fd-btn-add').first
+                for doc_path in existing_paths:
                     try:
                         with page.expect_event("filechooser", timeout=5000) as fc_info:
                             btn.click(timeout=3000)
@@ -764,14 +758,18 @@ class BeijingCourtAdapter(CourtAdapter):
                         logger.info(f"selected {doc_path} for section {title}")
                     except Exception as e:
                         logger.warning(f"filechooser failed for {title} / {doc_path}: {e}")
-                    # Wait for upload network request and UI update
                     self._wait(3)
-                # Verify expected file names appear in this section
-                expected_names = [os.path.basename(p) for p in paths if os.path.exists(p)]
-                shown_titles = page.locator('.fd-com-upload-grid-container .fd-file-container:not(.fd-btn-add)').evaluate_all(
-                    "elements => elements.map(e => e.getAttribute('title') || '')"
+                # Verify expected file names appear only in this section
+                expected_names = [os.path.basename(p) for p in existing_paths]
+                shown_titles = section.locator('.fd-com-upload-grid-container .fd-file-cursor').evaluate_all(
+                    """elements => elements.map(e => {
+                        const nameEl = e.querySelector('.fd-file-name');
+                        const name = nameEl ? (nameEl.innerText || nameEl.textContent || '') : '';
+                        const title = e.getAttribute('title') || '';
+                        return title || name;
+                    })"""
                 )
-                shown_names = [t.split('-')[-1] for t in shown_titles if t]
+                shown_names = [os.path.basename(t).split('-')[-1] for t in shown_titles if t]
                 logger.info(f"section {title} expected {expected_names}, shown {shown_names}")
             except Exception as e:
                 logger.warning(f"add button {i} ({title}) upload failed: {e}")
@@ -1600,8 +1598,8 @@ class BeijingCourtAdapter(CourtAdapter):
             return False
 
 
-    def submit_case(self, page: Page, case_data: dict = None) -> dict:
-        logger.info("提交立案申请...")
+    def submit_case(self, page: Page, case_data: dict = None, dry_run: bool = False) -> dict:
+        logger.info("提交立案申请..." if not dry_run else "dry_run: 提交前停止")
         self._case_data = case_data or getattr(self, '_case_data', None) or {}
         self._save_state(page, "submit_before")
 
@@ -1618,6 +1616,11 @@ class BeijingCourtAdapter(CourtAdapter):
             logger.warning("未能进入预览和提交步骤")
             self._save_state(page, "not_preview")
             return {"status": "failed", "message": "填写后仍未进入预览和提交页面"}
+
+        if dry_run:
+            logger.info("dry_run: 已到达预览和提交页面，停止提交")
+            self._save_state(page, "dry_run_preview")
+            return {"success": True, "case_id": "", "message": "dry_run: 已到达预览和提交页面，未提交"}
 
         # 3) 尝试真实提交
         submitted = False
@@ -1636,7 +1639,7 @@ class BeijingCourtAdapter(CourtAdapter):
                 return null;
             }""")
             if result:
-                logger.info(f"clicked {result}")
+                logger.info(f"submit action: {result}")
                 submitted = True
                 self._wait(5)
             # 3.5) 如果出现确认弹窗，点击“确认提交”或“确定”
