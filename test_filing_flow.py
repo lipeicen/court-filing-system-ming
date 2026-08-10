@@ -11,6 +11,20 @@ from pathlib import Path
 from datetime import datetime
 from loguru import logger
 
+try:
+    import pymysql
+except ImportError:
+    pymysql = None
+
+DB_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': 'lijiayu123',
+    'database': 'court_filing_civil_test',
+    'charset': 'utf8mb4',
+}
+
+
 base_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.join(base_dir, 'src')
 sys.path.insert(0, src_dir)
@@ -40,7 +54,76 @@ def load_cases():
         return json.load(f)
 
 
+def load_cases_from_db(limit=10):
+    """从数据库 cases + case_files 加载待立案案件。先按案件 LIMIT，再查文件，避免 JOIN 展开行截断。"""
+    if not pymysql:
+        raise ImportError('请安装 pymysql: pip install pymysql')
+    conn = pymysql.connect(**DB_CONFIG)
+    try:
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute("""
+            SELECT * FROM cases
+            WHERE status = 0
+            ORDER BY id DESC
+            LIMIT %s
+        """, (limit,))
+        case_rows = cursor.fetchall()
+        case_ids = [r['id'] for r in case_rows]
+        file_rows = []
+        if case_ids:
+            placeholders = ','.join(['%s'] * len(case_ids))
+            cursor.execute(f"""
+                SELECT case_id, file_category, file_name, file_path
+                FROM case_files
+                WHERE case_id IN ({placeholders})
+            """, tuple(case_ids))
+            file_rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    files_map = {}
+    for fr in file_rows:
+        files_map.setdefault(fr['case_id'], []).append(fr)
+
+    cases_map = {}
+    for row in case_rows:
+        case_id = row['id']
+        cases_map[case_id] = {
+            'case_no': row['case_no'] or '',
+            'case_name': row['case_name'] or '',
+            'case_type': row.get('case_type') or '民事案件',
+            'court_code': row.get('court_code') or 'beijing',
+            'court_name': row.get('court_name') or '北京市海淀区人民法院',
+            'case_cause': row.get('case_reason') or '买卖合同纠纷',
+            'amount': float(row['amount']) if row.get('amount') else 0.0,
+            'claims': row.get('claims') or '',
+            'facts': row.get('facts') or '',
+            'plaintiff': {
+                'name': row.get('applicant_name') or '',
+                'idcard': row.get('applicant_id') or row.get('applicant_cert_no') or '',
+                'phone': row.get('applicant_phone') or '',
+                'address': row.get('applicant_address') or '',
+            },
+            'defendant': {
+                'name': row.get('respondent_name') or '',
+                'idcard': row.get('respondent_id') or row.get('respondent_cert_no') or '',
+                'phone': row.get('respondent_phone') or '',
+                'address': row.get('respondent_address') or '',
+            },
+            'documents': [],
+        }
+        for fr in files_map.get(case_id, []):
+            if fr.get('file_path'):
+                cases_map[case_id]['documents'].append({
+                    'name': fr.get('file_name') or fr.get('file_category') or '材料',
+                    'type': fr.get('file_category') or '其他材料',
+                    'path': fr['file_path'],
+                })
+    return list(cases_map.values())
+
+
 def build_case_info(raw):
+
     parties = [
         Party(
             name=raw['plaintiff']['name'],
@@ -169,8 +252,12 @@ def run_case(browser, raw, index):
         # 填写当事人信息并提交
         adapter.fill_party_form(popup, case_info.to_dict())
         adapter.complete_case_info_and_preview(popup, case_info.to_dict())
-        submit = adapter.submit_case(popup, case_info.to_dict())
-        res['status'] = submit.get('success') and '已提交' or '已驳回'
+        dry_run = os.getenv('COURT_FILING_DRY_RUN', 'false').lower() in ('true', '1', 'yes')
+        submit = adapter.submit_case(popup, case_info.to_dict(), dry_run=dry_run)
+        if dry_run:
+            res['status'] = submit.get('success') and '待提交' or '已驳回'
+        else:
+            res['status'] = submit.get('success') and '已提交' or '已驳回'
         res['message'] = submit.get('message', '')
         res['case_id'] = submit.get('case_id')
         logger.info(f"结果: {res['status']} | {res['message']}")
@@ -219,9 +306,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--case-idx', type=int, default=-1, help='只跑指定索引的案件（0-based），-1 跑全部')
     parser.add_argument('--headless', type=lambda x: x.lower() in ('true', '1', 'yes'), default=True)
+    parser.add_argument('--from-db', action='store_true', help='从数据库 cases/case_files 加载案件和材料')
+    parser.add_argument('--db-limit', type=int, default=10, help='从数据库加载的案件数量上限')
     args = parser.parse_args()
 
-    raw_cases = load_cases()
+    raw_cases = load_cases_from_db(args.db_limit) if args.from_db else load_cases()
     if args.case_idx >= 0:
         raw_cases = [raw_cases[args.case_idx]]
 
