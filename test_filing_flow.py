@@ -91,16 +91,20 @@ def save_report(report, suffix=''):
 
 
 def prepare_login_state():
-    if os.path.exists(STATE_PATH):
-        logger.info(f"登录态已存在，跳过重新登录: {STATE_PATH}")
-        return
+    """登录态 30 分钟内有效则复用，否则重新登录（headless=False 提高验证码成功率）"""
+    state_file = Path(STATE_PATH)
+    if state_file.exists():
+        age_minutes = (time.time() - state_file.stat().st_mtime) / 60
+        if age_minutes < 30:
+            logger.info(f"登录态已存在且较新（{age_minutes:.1f} 分钟），跳过重新登录: {STATE_PATH}")
+            return
     adapter = BeijingCourtAdapter()
     credentials = {
         'username': os.getenv('BEIJING_COURT_USERNAME', ''),
         'password': os.getenv('BEIJING_COURT_PASSWORD', '')
     }
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=False)
         context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
         if not adapter.login(page, credentials):
