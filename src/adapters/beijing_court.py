@@ -134,26 +134,47 @@ class BeijingCourtAdapter(CourtAdapter):
             except Exception:
                 self._click_text(page, "密码登录", timeout=3000)
                 self._wait(1)
+
             inputs = page.query_selector_all(".uni-input-input")
             if len(inputs) >= 2:
                 inputs[0].fill(username)
                 inputs[1].fill(password)
             if len(inputs) >= 3:
                 try:
-                    imgs = page.query_selector_all("img")
-                    if imgs:
-                        imgs[0].screenshot(path=str(self.save_dir / "captcha.png"))
-                        with open(self.save_dir / "captcha.png", 'rb') as f:
-                            code = CaptchaSolver().solve_image_captcha(f.read())
+                    # find captcha image (class fd-images-code or inside fd-captcha)
+                    captcha_img = None
+                    candidates = page.query_selector_all("img")
+                    for img in candidates:
+                        cls = img.evaluate("el => el.className") or ""
+                        if "fd-images-code" in cls or "captcha" in cls:
+                            captcha_img = img
+                            break
+                    if not captcha_img:
+                        # fallback to first image in .fd-captcha
+                        captcha_img = page.locator(".fd-captcha img, .fd-images-code").first
+                    if captcha_img:
+                        # capture data URL or screenshot
+                        data_url = captcha_img.evaluate("""el => {
+                            if (el.src && el.src.startsWith('data:')) return el.src;
+                            return null;
+                        }""")
+                        if data_url:
+                            import base64
+                            header, b64 = data_url.split(',', 1)
+                            image_bytes = base64.b64decode(b64)
+                        else:
+                            image_bytes = captcha_img.screenshot()
+                        code = CaptchaSolver().solve_image_captcha(image_bytes)
                         inputs[2].fill(code)
                 except Exception as e:
                     logger.warning(f"captcha handling skipped: {e}")
-            for sel in [".fd-login-btn", "button:has-text('登录')", ".login-btn"]:
+            try:
+                page.click(".fd-login-btn", timeout=5000)
+            except Exception:
                 try:
-                    page.click(sel, timeout=3000)
-                    break
-                except Exception:
-                    pass
+                    page.click("text=登录", timeout=5000)
+                except Exception as e:
+                    logger.warning(f"click login failed: {e}")
             self._wait(5)
             content = page.content()
             if "在线立案" in content and "密码登录" not in content:
@@ -513,7 +534,7 @@ class BeijingCourtAdapter(CourtAdapter):
             return False
 
     def _select_case_cause(self, page: Page, case_data: dict):
-        logger.info("选择立案案由...")
+        logger.info("选择立案案由/法院...")
         # 1) 处理“选择立案方式”弹层/页面(未准备诉状 / 已准备诉状)
         try:
             page.wait_for_selector("text=请选择立案方式", timeout=10000)
@@ -530,29 +551,78 @@ class BeijingCourtAdapter(CourtAdapter):
             pass
         self._save_state(page, "case_cause")
 
-        # 3) 展开案由树
-        try:
-            page.locator(".uni-data-tree-input, .uni-data-tree, .input-value").first.click(timeout=5000)
-            self._wait(3)
-        except Exception as e:
-            logger.warning(f"展开案由树失败: {e}")
+        # 3) 选择具体法院（单选）
+        court_name = case_data.get("court_name") or getattr(self, "court_name", "")
+        if court_name:
+            try:
+                court_label = page.locator('uni-label, label, uni-view, view').filter(has_text=re.compile(re.escape(court_name))).first
+                if court_label.count() and court_label.is_visible(timeout=3000):
+                    court_label.click(timeout=5000)
+                    logger.info(f"选择法院: {court_name}")
+                    self._wait(1)
+                else:
+                    res = page.evaluate("""(courtName) => {
+                        const labels = Array.from(document.querySelectorAll('uni-label, label, uni-view, view'));
+                        const lbl = labels.find(el => (el.innerText||'').trim().includes(courtName));
+                        if (!lbl) return {err: 'label not found'};
+                        lbl.click();
+                        return {ok: true};
+                    }""", court_name)
+                    logger.info(f"JS选择法院: {court_name} -> {res}")
+            except Exception as e:
+                logger.warning(f"选择法院失败: {e}")
 
-        # 4) 搜索并选择案由(默认买卖合同纠纷)
+        # 4) 申请人类型（默认 本人申请）
+        try:
+            applicant_type = case_data.get("applicant_type", "本人申请")
+            type_label = page.locator('uni-label, label').filter(has_text=re.compile(applicant_type)).first
+            if type_label.count() and type_label.is_visible(timeout=2000):
+                type_label.click(timeout=3000)
+                logger.info(f"选择申请人类型: {applicant_type}")
+        except Exception as e:
+            logger.debug(f"申请人类型选择忽略: {e}")
+
+        self._wait(1)
+        self._save_state(page, "court_selected")
+
+        # 5) 案由搜索（如果存在搜索框）
         cause_keyword = case_data.get("metadata", {}).get("case_cause", "") or "买卖合同纠纷"
         try:
-            search_input = page.locator("input.fd-search-input, .fd-search-input input, .uni-input-input").first
-            search_input.fill(cause_keyword)
-            search_input.press("Enter")
-            self._wait(3)
-            page.locator(f"text={cause_keyword}").first.click(timeout=5000)
+            res = page.evaluate(r"""(args) => {
+                const keyword = args.keyword;
+                function isVisible(el) { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }
+                const inputs = Array.from(document.querySelectorAll('input.uni-input-input, input[type="text"], uni-input input')).filter(isVisible);
+                const inp = inputs.find(i => (i.placeholder || '').includes('搜索') || (i.placeholder || '').includes('关键词') || (i.placeholder || '').includes('案由')) || inputs[0];
+                if (!inp) return {err: 'no input'};
+                inp.value = keyword;
+                inp.dispatchEvent(new Event('input', {bubbles: true}));
+                inp.dispatchEvent(new Event('change', {bubbles: true}));
+                return {ok: true};
+            }""", {"keyword": cause_keyword})
+            logger.info(f"案由搜索输入: {cause_keyword} -> {res}")
+            self._wait(1)
+            search_btn = page.locator('uni-button, button').filter(has_text=re.compile('搜索')).first
+            if search_btn.count() and search_btn.is_visible(timeout=2000):
+                search_btn.click(timeout=5000)
+                logger.info("点击案由搜索")
+                self._wait(3)
+            # 选择第一个匹配结果
+            opts = page.locator('uni-view, view, uni-text, text').filter(has_text=re.compile(re.escape(cause_keyword))).all()
+            if opts:
+                opts[0].click(timeout=5000)
+                logger.info(f"选择案由结果: {cause_keyword}")
+            else:
+                first_opt = page.locator('.uni-data-tree-item, .uni-picker-item, .uni-list-item, uni-view, view').first
+                if first_opt.count() and first_opt.is_visible(timeout=2000):
+                    first_opt.click(timeout=3000)
+                    logger.info("选择第一个案由结果")
             self._wait(2)
-            logger.info(f"selected case cause: {cause_keyword}")
         except Exception as e:
-            logger.warning(f"搜索选择案由失败: {e}")
+            logger.warning(f"案由搜索失败: {e}")
 
         self._save_state(page, "case_cause_selected")
 
-        # 5) 下一步（进入上传诉讼材料页面）
+        # 6) 下一步（进入上传诉讼材料页面）
         self._click_page_bottom_next(page)
         self._wait(5)
         self._save_state(page, "case_cause_next")
@@ -681,46 +751,64 @@ class BeijingCourtAdapter(CourtAdapter):
         # 1) 标的金额
         amount = case_data.get("amount", 0)
         try:
-            self._fill_field_by_label(page, "标的金额", str(amount))
+            self._fill_party_card_fields(page, {"标的金额（元）": str(amount)})
             logger.info(f"填写标的金额: {amount}")
         except Exception as e1:
             logger.warning(f"填标的金额失败: {e1}")
-        self._wait(1)
+        self._wait(0.5)
 
         parties = case_data.get("parties", [])
         plaintiff = next((p for p in parties if p.get("party_type") == "原告"), {})
         defendant = next((p for p in parties if p.get("party_type") == "被告"), {})
 
-        # 2) 编辑/添加原告（优先编辑已有卡片）
+        # 2) 编辑原告（已有默认卡片）
         if plaintiff:
             try:
-                # 尝试点击“编辑”打开已有原告卡片
-                edit_res = self._js_click_text(page, "编辑", exact=False)
-                if edit_res.get('ok'):
+                res = self._js_click_section_button(page, "原告信息", "编辑")
+                if res.get('ok'):
                     logger.info("点击原告编辑")
                     self._wait(2)
-                    self._fill_party_dialog(page, plaintiff, role="原告")
+                    self._fill_party_current_card(page, plaintiff, role="原告")
+                    self._click_card_save(page)
+                    self._wait(2)
                 else:
-                    logger.warning(f"未找到原告编辑按钮: {edit_res}，尝试添加新原告")
-                    self._add_party_by_section(page, "原告信息", plaintiff, role="原告")
+                    logger.warning(f"未找到原告编辑按钮: {res}，尝试添加")
+                    self._js_click_section_button(page, "原告信息", "添加自然人")
+                    self._wait(2)
+                    self._fill_party_current_card(page, plaintiff, role="原告")
+                    self._click_card_save(page)
+                    self._wait(2)
             except Exception as e:
-                logger.warning(f"编辑原告失败: {e}，尝试添加新原告")
-                self._add_party_by_section(page, "原告信息", plaintiff, role="原告")
+                logger.warning(f"原告处理失败: {e}")
 
         # 3) 添加被告
         if defendant:
-            self._add_party_by_section(page, "被告信息", defendant, role="被告")
+            try:
+                self._js_click_section_button(page, "被告信息", "添加自然人")
+                self._wait(2)
+                self._fill_party_current_card(page, defendant, role="被告")
+                self._click_card_save(page)
+                self._wait(2)
+            except Exception as e:
+                logger.warning(f"添加被告失败: {e}")
         else:
             logger.warning("案件无被告信息，跳过")
 
-        # 4) 第三人（若有，否则取消默认空表单）
+        # 4) 第三人（若有）
         third_party = next((p for p in parties if p.get("party_type") == "第三人"), {})
         if third_party:
-            self._add_party_by_section(page, "第三人信息", third_party, role="第三人")
+            try:
+                self._js_click_section_button(page, "第三人信息", "添加自然人")
+                self._wait(2)
+                self._fill_party_current_card(page, third_party, role="第三人")
+                self._click_card_save(page)
+                self._wait(2)
+            except Exception as e:
+                logger.warning(f"添加第三人失败: {e}")
         else:
             self._cancel_empty_section(page, "第三人信息")
 
-        # 5) 代理人（必填项，若案件数据没有则用默认）
+        # 5) 代理人（必填）
         agent = next((p for p in parties if p.get("party_type") == "代理人"), {})
         if not agent:
             agent = {
@@ -732,10 +820,40 @@ class BeijingCourtAdapter(CourtAdapter):
                 "address": "北京市海淀区代理路1号"
             }
             logger.info("使用默认代理人信息")
-        self._add_party_by_section(page, "代理人信息", agent, role="代理人")
+        try:
+            self._js_click_section_button(page, "代理人信息", "添加律师")
+            self._wait(2)
+            self._fill_party_current_card(page, agent, role="代理人")
+            self._click_card_save(page)
+            self._wait(2)
+        except Exception as e:
+            logger.warning(f"添加代理人失败: {e}")
 
-        # 6) 点击页面底部下一步
+        # 6) 下一步
         self._click_page_bottom_next(page)
+
+    def _fill_party_current_card(self, page: Page, party: dict, role: str = "原告"):
+        """根据当前卡片字段填写当事人信息"""
+        values = {}
+        if party.get("name"):
+            values["姓名"] = party["name"]
+        if party.get("cert_no") or party.get("idcard"):
+            values["证件号码"] = party.get("cert_no") or party.get("idcard") or ""
+        if party.get("phone"):
+            values["联系电话"] = party["phone"]
+        if party.get("address"):
+            values["住所地（户籍所在地）"] = party["address"]
+            values["经常居住地"] = party["address"]
+        values["工作单位"] = party.get("work_unit", "无") or "无"
+        values["职务"] = party.get("position", "其他") or "其他"
+        if role in ("被告", "第三人", "代理人"):
+            values["性别"] = party.get("gender", "男") or "男"
+            values["国别或地区"] = party.get("country", "中国") or "中国"
+            values["民族"] = party.get("nation", "汉族") or "汉族"
+        logger.info(f"准备填写 {role} 字段: {list(values.keys())}")
+        res = self._fill_party_card_fields(page, values)
+        logger.info(f"{role} 填写结果: {res}")
+
 
 
     def _add_party_by_section(self, page: Page, section_title: str, party: dict, role: str = "原告", agent_type: str = "自然人"):
@@ -839,6 +957,154 @@ class BeijingCourtAdapter(CourtAdapter):
             return {err: 'not found', text};
         }"""
         return page.evaluate(script, {"text": text, "exact": exact, "tagFilter": tag_filter})
+
+
+    def _fill_party_card_fields(self, page: Page, values: dict) -> dict:
+        """Fill all visible fields in the currently opened party card using Playwright."""
+        results = {}
+        for label, value in values.items():
+            if value is None or str(value) == "":
+                continue
+            try:
+                item = page.locator(".uni-forms-item, uni-forms-item, .fd-com-form-item").filter(has_text=label).filter(has=page.locator("input, .uni-data-tree, .uni-select, .uni-picker, .uni-data-tree-input, .input-value")).last
+                if item.count() == 0:
+                    results[label] = {"err": "not found"}
+                    continue
+                tree = item.locator(".uni-data-tree, .uni-select, .uni-picker, .uni-data-tree-input, .input-value").first
+                if tree.count() > 0:
+                    tree.click(timeout=5000)
+                    self._wait(0.8)
+                    chosen_text = page.evaluate(
+                        """(value) => {
+                            function isVisible(el) { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }
+                            const popups = Array.from(document.querySelectorAll('.uni-data-tree-popup, .uni-select-popup, .uni-picker-container, .uni-popup, .uni-list, .uni-data-pickerview, .uni-picker')).filter(isVisible);
+                            let best = null, bestText = '';
+                            for (const pop of popups) {
+                                const elems = Array.from(pop.querySelectorAll('.fd-item, .item-text, .uni-picker-item, .uni-list-item, .uni-picker-view-group-item'));
+                                for (const el of elems) {
+                                    if (!isVisible(el)) continue;
+                                    const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+                                    if (!t) continue;
+                                    if (t === value) { best = el; bestText = t; break; }
+                                    if (!best && t.includes(value)) { best = el; bestText = t; }
+                                }
+                                if (best && bestText === value) break;
+                            }
+                            if (best) { best.click(); return bestText; }
+                            return null;
+                        }""", str(value)
+                    )
+                    if chosen_text:
+                        results[label] = {"ok": True, "text": chosen_text}
+                    else:
+                        results[label] = {"err": "option not found", "value": value}
+                    self._wait(0.3)
+                else:
+                    inp = item.locator("input.uni-input-input, input.uni-easyinput__content-input, textarea.uni-easyinput__content-textarea, input").first
+                    if inp.count() == 0:
+                        results[label] = {"err": "no input"}
+                        continue
+                    if inp.is_disabled():
+                        results[label] = {"ok": True, "skipped": "disabled", "value": str(value)}
+                        continue
+                    val = str(value)
+                    inp.fill(val, timeout=5000)
+                    inp.evaluate(
+                        """(el, value) => {
+                            const d = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value') || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
+                            if (d && d.set) d.set.call(el, value);
+                            el.dispatchEvent(new Event('input', {bubbles: true}));
+                            el.dispatchEvent(new Event('change', {bubbles: true}));
+                            el.dispatchEvent(new Event('blur', {bubbles: true}));
+                        }""", val
+                    )
+                    results[label] = {"ok": True, "value": val}
+            except Exception as e:
+                results[label] = {"err": str(e), "value": value}
+        return results
+
+
+
+
+    def _click_card_save(self, page: Page) -> dict:
+        """Click the save button of the currently opened party card and wait for close."""
+        try:
+            sel = "uni-button:visible:has-text('保存'), button:visible:has-text('保存'), .uni-button--primary:visible, .fd-com-btn-primary:visible, .fd-com-btn-container >> text=保存"
+            btns = page.locator(sel)
+            cnt = btns.count()
+            btn = None
+            for i in range(cnt):
+                b = btns.nth(i)
+                txt = (b.inner_text(timeout=1000) or '').replace('\n', '').strip()
+                if '保存' in txt and '取消' not in txt:
+                    btn = b
+                    break
+            if not btn:
+                all = page.locator("text=保存")
+                for i in range(all.count()):
+                    b = all.nth(i)
+                    if b.is_visible() and (b.inner_text(timeout=1000) or '').strip() == '保存':
+                        btn = b
+                        break
+            if not btn:
+                return {"err": "save button not found"}
+            btn.click(timeout=5000)
+            self._wait(1.5)
+            for _ in range(20):
+                if page.locator("uni-button:visible:has-text('保存'), button:visible:has-text('保存')").count() == 0:
+                    break
+                self._wait(0.3)
+            return {"ok": True}
+        except Exception as e:
+            return {"err": str(e)}
+
+
+
+    def _js_click_section_button(self, page: Page, section_title: str, btn_text: str) -> dict:
+        return page.evaluate("""(args) => {
+            const sectionTitle = args.sectionTitle, btnText = args.btnText;
+            function isVisible(el) { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }
+            const all = Array.from(document.querySelectorAll('uni-section, .uni-section, section, uni-view, div')).filter(isVisible);
+            let section = null;
+            for (const el of all) {
+                const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+                if (t.includes(sectionTitle)) {
+                    if (el.tagName === 'UNI-SECTION' || el.className.includes('uni-section') && !el.className.includes('uni-section-header')) {
+                        section = el; break;
+                    }
+                    if (!section) section = el;
+                }
+            }
+            if (!section) return {err: 'section not found', sectionTitle};
+            // if we picked a header, walk up to the section container
+            if (section.className.includes('uni-section-header') || section.tagName === 'UNI-VIEW' && section.className.includes('header')) {
+                let p = section.parentElement;
+                while (p && !p.className.includes('uni-section') && p.tagName !== 'UNI-SECTION') p = p.parentElement;
+                section = p || section;
+            }
+            let target = null;
+            if (btnText.includes('编辑')) {
+                const icons = Array.from(section.querySelectorAll('.uniui-compose, .fd-sscyr-option-pc-icon, .fd-sscyr-edit-icon')).filter(isVisible);
+                if (icons.length) target = icons[0];
+            }
+            if (!target) {
+                // add buttons often have class fd-sscyr-add-btn; prefer those
+                let addBtns = Array.from(section.querySelectorAll('.fd-sscyr-add-btn')).filter(e => isVisible(e) && (e.innerText || '').trim().includes(btnText));
+                if (!addBtns.length) {
+                    addBtns = Array.from(section.querySelectorAll('uni-view, view, uni-button, button, span')).filter(e => isVisible(e) && (e.innerText || '').trim() === btnText);
+                }
+                if (addBtns.length) {
+                    target = addBtns.sort((a, b) => { const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect(); return (ra.width * ra.height) - (rb.width * rb.height); })[0];
+                }
+            }
+            if (!target) return {err: 'btn not found in section', sectionTitle, btnText, sectionClass: section.className};
+            target.click();
+            return {ok: true, sectionTitle, btnText, clicked: (target.innerText || '').replace(/\s+/g, ' ').trim(), className: target.className};
+        }""", {"sectionTitle": section_title, "btnText": btn_text})
+
+
+
+
 
     def _js_find_form_item(self, page: Page, label: str) -> dict:
         """用 JS 找到包含 label 的 uni-forms-item 并返回标签和可输入元素信息"""
@@ -964,40 +1230,6 @@ class BeijingCourtAdapter(CourtAdapter):
         }"""
         return page.evaluate(script, {"label": label, "value": value})
 
-    def _js_click_save(self, page: Page) -> dict:
-        """用 JS 点击当前编辑卡片中的保存按钮（primary 类型）"""
-        return page.evaluate("""() => {
-            function isVisible(el) {
-                const r = el.getBoundingClientRect();
-                return r.width > 0 && r.height > 0;
-            }
-            // 1) 优先 primary 保存
-            const buttons = document.querySelectorAll('uni-button, button');
-            for (const b of buttons) {
-                if (!isVisible(b)) continue;
-                const t = (b.innerText || '').trim();
-                if (t === '保存' || t.includes('保存')) {
-                    const type = b.getAttribute('type') || b.getAttribute('data-type') || '';
-                    if (type.includes('primary') || b.className.includes('primary')) {
-                        b.click(); return {ok: true, text: t, primary: true};
-                    }
-                }
-            }
-            // 2) 任意保存
-            for (const b of buttons) {
-                if (!isVisible(b)) continue;
-                const t = (b.innerText || '').trim();
-                if (t === '保存' || t.includes('保存')) { b.click(); return {ok: true, text: t}; }
-            }
-            // 3) 在 fd-com-btn-container 中点最后一个按钮（通常是保存）
-            const containers = document.querySelectorAll('.fd-com-btn-container');
-            for (const c of containers) {
-                if (!isVisible(c)) continue;
-                const btns = c.querySelectorAll('uni-button, button');
-                if (btns.length) { btns[btns.length-1].click(); return {ok: true, fallback: 'last in container'}; }
-            }
-            return {err: 'save not found'};
-        }""")
 
     def _js_click_add_party(self, page: Page, section_title: str, btn_text: str) -> dict:
         """用 JS 在指定区域点击添加按钮"""
@@ -1205,23 +1437,9 @@ class BeijingCourtAdapter(CourtAdapter):
             logger.warning(f"上传 {label} 失败: {e}")
 
 
-    def _click_card_save(self, page: Page) -> bool:
-        """保存当前当事人卡片"""
-        try:
-            result = self._js_click_save(page)
-            if result.get('ok'):
-                logger.info("点击保存按钮")
-                self._wait(2)
-                return True
-            logger.warning(f"保存按钮失败: {result}")
-            return False
-        except Exception as e:
-            logger.warning(f"点击卡片保存异常: {e}")
-            return False
-
 
     def _click_page_bottom_next(self, page: Page) -> bool:
-        """滚动到底部并点击页面底部下一步"""
+        """滚动到底部并点击页面底部下一步，自动处理签名提示弹窗"""
         try:
             result = self._js_click_bottom_next(page)
             if result.get('ok'):
@@ -1231,11 +1449,111 @@ class BeijingCourtAdapter(CourtAdapter):
                 except Exception:
                     pass
                 self._wait(2)
+                self._dismiss_signature_popup(page)
                 return True
             logger.warning(f"点击页面底部下一步失败: {result}")
             return False
         except Exception as e:
             logger.warning(f"点击页面底部下一步异常: {e}")
+            return False
+
+    def _dismiss_signature_popup(self, page: Page) -> bool:
+        """点击签名/提示类弹窗的确定按钮"""
+        try:
+            for text in ["确定", "我知道了", "确认"]:
+                candidates = page.locator(f"uni-button:visible:has-text('{text}'), button:visible:has-text('{text}'), .uni-button:visible:has-text('{text}'), .uni-modal__btn:visible:has-text('{text}'), .uni-modal__btn_primary:visible:has-text('{text}')")
+                for i in range(candidates.count()):
+                    btn = candidates.nth(i)
+                    if btn.is_visible():
+                        btn.click(timeout=3000)
+                        logger.info(f"点击弹窗按钮: {text}")
+                        self._wait(2)
+                        self._dismiss_signature_popup(page)
+                        return True
+            return False
+        except Exception as e:
+            logger.debug(f"弹窗处理异常: {e}")
+            return False
+        except Exception as e:
+            logger.debug(f"弹窗处理异常: {e}")
+            return False
+        except Exception as e:
+            logger.debug(f"弹窗处理异常: {e}")
+            return False
+        except Exception as e:
+            logger.debug(f"弹窗处理异常: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"点击页面底部下一步异常: {e}")
+            return False
+
+
+    def fill_claims_and_facts(self, page: Page, case_data: dict = None) -> None:
+        """填写诉讼请求和事实与理由"""
+        if not case_data:
+            case_data = getattr(self, '_case_data', {}) or {}
+        claim = case_data.get('claim', case_data.get('claims', '请求被告支付欠款人民币100000元及利息。'))
+        facts = case_data.get('facts', case_data.get('fact_reason', '原被告之间存在买卖合同关系，原告已履行交货义务，被告未支付货款。'))
+        # 诉讼请求
+        for label in ['诉讼请求1', '诉讼请求', '诉讼']:
+            try:
+                item = page.locator('.uni-forms-item, uni-forms-item, .fd-com-form-item').filter(has_text=label).filter(has=page.locator('textarea, input')).last
+                if item.count() == 0:
+                    continue
+                inp = item.locator('textarea, input').first
+                inp.fill(str(claim), timeout=5000)
+                logger.info(f'填写诉讼请求: {claim[:30]}')
+                break
+            except Exception as e:
+                logger.warning(f'填写诉讼请求 {label} 失败: {e}')
+        # 事实与理由
+        for label in ['事实与理由', '事实理由']:
+            try:
+                item = page.locator('.uni-forms-item, uni-forms-item, .fd-com-form-item').filter(has_text=label).filter(has=page.locator('textarea, input')).last
+                if item.count() == 0:
+                    continue
+                inp = item.locator('textarea, input').first
+                inp.fill(str(facts), timeout=5000)
+                logger.info(f'填写事实与理由: {facts[:30]}')
+                break
+            except Exception as e:
+                logger.warning(f'填写事实与理由 {label} 失败: {e}')
+        self._wait(1)
+
+
+    def complete_case_info_and_preview(self, page: Page, case_data: dict = None) -> bool:
+        """从完善案件信息（诉讼请求/事实理由）填写并推进到预览和提交页面，处理签名弹窗"""
+        if not case_data:
+            case_data = getattr(self, '_case_data', {}) or {}
+        self.fill_claims_and_facts(page, case_data)
+        self._click_page_bottom_next(page)
+        self._wait(1)
+        # handle signature list if it appears after the initial notice popup
+        if self._has_text(page, '我的签字') or page.locator(".fd-com-layer-header:visible:has-text('我的签字')").count():
+            self._select_signature(page)
+            self._wait(2)
+            # after selecting signature, document preview is shown; click next to go to preview/submit
+            self._click_page_bottom_next(page)
+            self._wait(2)
+        return self._has_text(page, '预览和提交') or self._has_text(page, '提交立案')
+
+    def _select_signature(self, page: Page) -> bool:
+        """选择第一个可用签名并点击引入签章"""
+        try:
+            cards = page.locator('.fd-com-card-list .fd-com-card').locator(':visible')
+            if cards.count():
+                cards.first.click(timeout=5000)
+                logger.info('选择第一个签名卡片')
+                self._wait(1)
+            import_btn = page.locator("uni-button:visible:has-text('引入签章')")
+            if import_btn.count():
+                import_btn.first.click(timeout=5000)
+                logger.info('点击引入签章')
+                self._wait(3)
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f'选择签名异常: {e}')
             return False
 
 
@@ -1244,46 +1562,52 @@ class BeijingCourtAdapter(CourtAdapter):
         self._case_data = case_data or getattr(self, '_case_data', None) or {}
         self._save_state(page, "submit_before")
 
-        # 1) 如果当前还在完善案件信息，先填写当事人并尝试进入预览
+        # 1) 如果当前还在完善案件信息，推进到预览和提交
         if self._has_text(page, "完善案件信息"):
-            logger.info("当前在完善案件信息页面，先填写当事人")
-            self.fill_party_form(page, self._case_data)
-            self._wait(2)
-            self._save_state(page, "preview")
-        else:
-            logger.info("已到达预览或提交页面")
+            logger.info("当前在完善案件信息页面，先填写并推进到预览")
+            if not self.complete_case_info_and_preview(page, self._case_data):
+                logger.warning("未能进入预览和提交步骤")
+                self._save_state(page, "not_preview")
+                return {"status": "failed", "message": "填写后仍未进入预览和提交页面"}
 
-        # 2) 检查是否真的到了预览和提交步骤（进度条第6步或文本）
+        # 2) 检查是否真的到了预览和提交步骤
         if not (self._has_text(page, "预览和提交") or self._has_text(page, "提交立案")):
             logger.warning("未能进入预览和提交步骤")
             self._save_state(page, "not_preview")
-            return {"status": "failed", "message": "填写当事人后仍未进入预览和提交页面"}
+            return {"status": "failed", "message": "填写后仍未进入预览和提交页面"}
 
         # 3) 尝试真实提交
         submitted = False
         case_id = ""
         message = "已走到预览和提交步骤，但未触发真实提交"
         try:
-            for btn_text in ["提交", "确认提交", "确定", "立即提交"]:
-                try:
-                    loc = page.locator("uni-button").filter(has_text=btn_text)
-                    if loc.count() and loc.first.is_visible():
-                        loc.first.click(timeout=5000)
-                        logger.info(f"clicked {btn_text}")
-                        submitted = True
-                        self._wait(5)
-                        break
-                except Exception:
-                    continue
-            if not submitted:
-                page.evaluate("""() => {
-                    const btns = document.querySelectorAll('uni-button, button');
-                    for (const b of btns) {
-                        if ((b.innerText || '').includes('提交')) { b.click(); return b.innerText; }
-                    }
-                    return null;
-                }""")
+            # 3) 尝试点击提交按钮（优先使用 JS，避免自定义元素选择器问题）
+            result = page.evaluate("""() => {
+                const btns = document.querySelectorAll('uni-button, button, .uni-modal__btn');
+                for (const b of btns) {
+                    const t = (b.innerText || '').trim();
+                    if (t === '提交' || t === '确认提交' || t === '立即提交') { b.click(); return 'clicked ' + t; }
+                }
+                return null;
+            }""")
+            if result:
+                logger.info(f"clicked {result}")
+                submitted = True
                 self._wait(5)
+
+            # 4) 处理先行调解弹窗
+            self._handle_mediation_dialog(page)
+
+            # 5) 如果提交后出现成功页，直接返回
+            if self._has_text(page, "提交成功"):
+                self._save_state(page, "submitted_success")
+                return {"success": True, "case_id": "", "message": "立案申请已提交成功"}
+
+            # 5) 处理手机验证码（目前只检测，不填写真实验证码）
+            if self._has_verification_dialog(page):
+                logger.warning("出现验证码/人脸验证弹窗，需要人工处理")
+                self._save_state(page, "verification_required")
+                return {"success": False, "case_id": "", "message": "提交需要验证码/人脸验证，暂停"}
 
             content = page.content()
             m = re.search(r'案件编号[：:]\s*([A-Za-z0-9\-]+)', content)
@@ -1300,6 +1624,43 @@ class BeijingCourtAdapter(CourtAdapter):
 
         self._save_state(page, "submitted")
         return {"success": submitted, "case_id": case_id, "message": message}
+
+    def _handle_mediation_dialog(self, page: Page) -> bool:
+        """处理先行调解弹窗：默认不同意"""
+        try:
+            # Use JS to reliably click the disagree button inside the mediation dialog
+            result = page.evaluate("""() => {
+                const btns = document.querySelectorAll('uni-button, button, .uni-modal__btn, .fd-com-btn-container uni-button');
+                for (const b of btns) {
+                    const t = (b.innerText || '').trim();
+                    if (t.includes('不同意进行先行调解')) { b.click(); return 'clicked ' + t; }
+                }
+                return 'not found';
+            }""")
+            if result and result.startswith('clicked'):
+                logger.info(f"点击调解选项: 不同意进行先行调解")
+                self._wait(3)
+                return True
+            return False
+        except Exception as e:
+            logger.debug(f"调解弹窗处理异常: {e}")
+            return False
+        except Exception as e:
+            logger.debug(f"调解弹窗处理异常: {e}")
+            return False
+
+    def _has_verification_dialog(self, page: Page) -> bool:
+        """检测是否出现验证码、人脸识别或短信验证弹窗"""
+        try:
+            texts = ["验证码", "短信验证", "人脸识别", "扫码验证", "确认提交"]
+            for t in texts:
+                if self._has_text(page, t):
+                    # 确认是输入/验证类弹窗
+                    if page.locator("input[placeholder*=验证码], input[placeholder*=短信], .uni-modal:visible").count():
+                        return True
+            return False
+        except Exception:
+            return False
 
 
     def check_status(self, page: Page, case_id: str) -> dict:

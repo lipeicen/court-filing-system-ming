@@ -14,6 +14,11 @@ class OperationRecorder:
         # 确保截图目录存在
         os.makedirs(settings.SCREENSHOT_DIR, exist_ok=True)
     
+    def set_page(self, page):
+        """切换绑定的页面（例如从主页面切到弹窗页面）"""
+        self.page = page
+        self._setup_listeners()
+    
     def _setup_listeners(self):
         # 设置事件监听
         self.page.on("console", self._on_console)

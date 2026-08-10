@@ -74,6 +74,8 @@ class FilingWorkflow:
             popup = adapter.navigate_to_filing(page)
             if popup is None:
                 raise Exception("未能进入立案表单页面")
+            # 后续操作都在 popup 页面，recorder 切换到 popup
+            recorder.set_page(popup)
             recorder.save_screenshot("filing_page")
             
             self._log_step(result, "填写案件信息")

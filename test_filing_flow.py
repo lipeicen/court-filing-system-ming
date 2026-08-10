@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import time
+from pathlib import Path
 from datetime import datetime
 from loguru import logger
 
@@ -59,7 +60,7 @@ def build_case_info(raw):
     docs = [
         CaseDocument(
             name=d['name'],
-            path=os.path.join(base_dir, 'src', d['path']),
+            path=os.path.join(base_dir, d['path']),
             doc_type=d['type'],
             description=d['name']
         )
@@ -90,6 +91,9 @@ def save_report(report, suffix=''):
 
 
 def prepare_login_state():
+    if os.path.exists(STATE_PATH):
+        logger.info(f"登录态已存在，跳过重新登录: {STATE_PATH}")
+        return
     adapter = BeijingCourtAdapter()
     credentials = {
         'username': os.getenv('BEIJING_COURT_USERNAME', ''),
@@ -132,8 +136,11 @@ def run_case(browser, raw, index):
         adapter.fill_case_form(popup, case_info.to_dict())
         if case_info.documents:
             adapter.upload_documents(popup, [d.to_dict() for d in case_info.documents])
-        submit = adapter.submit_case(popup)
-        res['status'] = submit['success'] and '已提交' or '已驳回'
+        # 填写当事人信息并提交
+        adapter.fill_party_form(popup, case_info.to_dict())
+        adapter.complete_case_info_and_preview(popup, case_info.to_dict())
+        submit = adapter.submit_case(popup, case_info.to_dict())
+        res['status'] = submit.get('success') and '已提交' or '已驳回'
         res['message'] = submit.get('message', '')
         res['case_id'] = submit.get('case_id')
         logger.info(f"结果: {res['status']} | {res['message']}")
@@ -173,4 +180,32 @@ def run_all_cases():
 
 
 if __name__ == '__main__':
-    run_all_cases()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--case-idx', type=int, default=-1, help='只跑指定索引的案件（0-based），-1 跑全部')
+    parser.add_argument('--headless', type=lambda x: x.lower() in ('true', '1', 'yes'), default=True)
+    args = parser.parse_args()
+
+    raw_cases = load_cases()
+    if args.case_idx >= 0:
+        raw_cases = [raw_cases[args.case_idx]]
+
+    report = {
+        'time': __import__('datetime').datetime.now().isoformat(),
+        'total': len(raw_cases),
+        'results': []
+    }
+    prepare_login_state()
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=args.headless)
+        for i, raw in enumerate(raw_cases, 1):
+            res = run_case(browser, raw, i)
+            report['results'].append(res)
+            save_report(report, suffix=f'_progress_{i}of{len(raw_cases)}')
+            time.sleep(2)
+        browser.close()
+
+    save_report(report)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+
