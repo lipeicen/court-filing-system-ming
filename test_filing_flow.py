@@ -90,14 +90,36 @@ def save_report(report, suffix=''):
     return report_path
 
 
+def _validate_state() -> bool:
+    """打开首页验证 storage_state 是否仍有效"""
+    if not Path(STATE_PATH).exists():
+        return False
+    adapter = BeijingCourtAdapter()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(storage_state=STATE_PATH, viewport={'width': 1920, 'height': 1080})
+        page = context.new_page()
+        try:
+            page.goto(f"{adapter.base_url}/zxfw/#/pages/pc/home/index", wait_until="domcontentloaded", timeout=10000)
+            adapter._wait(2)
+            content = page.content()
+            valid = "在线立案" in content and "密码登录" not in content
+            if not valid:
+                logger.warning(f"storage_state 已失效，需要重新登录")
+            return valid
+        except Exception as e:
+            logger.warning(f"验证登录态失败: {e}")
+            return False
+        finally:
+            context.close()
+            browser.close()
+
+
 def prepare_login_state():
-    """登录态 30 分钟内有效则复用，否则重新登录（headless=False 提高验证码成功率）"""
-    state_file = Path(STATE_PATH)
-    if state_file.exists():
-        age_minutes = (time.time() - state_file.stat().st_mtime) / 60
-        if age_minutes < 30:
-            logger.info(f"登录态已存在且较新（{age_minutes:.1f} 分钟），跳过重新登录: {STATE_PATH}")
-            return
+    """登录态有效则复用，否则重新登录（headless=False 提高验证码成功率）"""
+    if _validate_state():
+        logger.info(f"登录态有效，跳过重新登录: {STATE_PATH}")
+        return
     adapter = BeijingCourtAdapter()
     credentials = {
         'username': os.getenv('BEIJING_COURT_USERNAME', ''),
