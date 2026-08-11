@@ -629,7 +629,7 @@ class BeijingCourtAdapter(CourtAdapter):
         self._save_state(page, "court_selected")
 
         # 5) 案由搜索（如果存在搜索框）
-        cause_keyword = case_data.get("metadata", {}).get("case_cause", "") or "买卖合同纠纷"
+        cause_keyword = case_data.get("case_reason") or case_data.get("metadata", {}).get("case_cause", "") or "买卖合同纠纷"
         try:
             res = page.evaluate(r"""(args) => {
                 const keyword = args.keyword;
@@ -1601,18 +1601,44 @@ class BeijingCourtAdapter(CourtAdapter):
     def _select_signature(self, page: Page) -> bool:
         """选择第一个可用签名并点击引入签章"""
         try:
-            cards = page.locator('.fd-com-card-list .fd-com-card').locator(':visible')
-            if cards.count():
-                cards.first.click(timeout=5000)
-                logger.info('选择第一个签名卡片')
+            card_selectors = [
+                '.fd-com-card-list .fd-com-card',
+                '.signature-list .signature-item',
+                '.sign-list .sign-item',
+                '[class*="card"][class*="sign"]',
+                '.uni-list-item',
+                'uni-radio',
+            ]
+            selected = False
+            for sel in card_selectors:
+                try:
+                    loc = page.locator(sel).first
+                    if loc.count() and loc.is_visible(timeout=3000):
+                        loc.click(timeout=5000)
+                        logger.info(f'选择签名卡片: {sel}')
+                        selected = True
+                        self._wait(1)
+                        break
+                except Exception:
+                    continue
+            if not selected:
+                logger.warning('未找到可选签名卡片，尝试使用JS点击第一个可见签名元素')
+                page.evaluate("""() => {
+                    const cards = document.querySelectorAll('.fd-com-card, .signature-item, .sign-item, uni-radio, .uni-list-item');
+                    for (const c of cards) {
+                        if (c.offsetParent) { c.click(); return 'clicked'; }
+                    }
+                    return 'none';
+                }""")
                 self._wait(1)
-            import_btn = page.locator("uni-button:visible:has-text('引入签章')")
+            import_btn = page.locator("uni-button:visible:has-text('引入签章'), button:visible:has-text('引入签章'), .uni-button:visible:has-text('引入签章')")
             if import_btn.count():
                 import_btn.first.click(timeout=5000)
                 logger.info('点击引入签章')
                 self._wait(3)
                 return True
-            return False
+            logger.info('未找到引入签章按钮，可能已自动选择')
+            return selected
         except Exception as e:
             logger.warning(f'选择签名异常: {e}')
             return False
@@ -1629,14 +1655,14 @@ class BeijingCourtAdapter(CourtAdapter):
             if not self.complete_case_info_and_preview(page, self._case_data):
                 logger.warning("未能进入预览和提交步骤")
                 self._save_state(page, "not_preview")
-                return {"status": "failed", "message": "填写后仍未进入预览和提交页面"}
+                return {"success": False, "status": "failed", "case_id": "", "message": "填写后仍未进入预览和提交页面"}
 
         # 2) 检查是否真的到了预览和提交步骤
         active = self._get_active_step_text(page)
         if active not in ('预览和提交', '提交立案'):
             logger.warning(f"未能进入预览和提交步骤，当前步骤: {active!r}")
             self._save_state(page, "not_preview")
-            return {"status": "failed", "message": f"填写后仍未进入预览和提交页面，当前步骤: {active}"}
+            return {"success": False, "status": "failed", "case_id": "", "message": f"填写后仍未进入预览和提交页面，当前步骤: {active}"}
 
         if dry_run:
             logger.info("dry_run: 已到达预览和提交页面，停止提交")

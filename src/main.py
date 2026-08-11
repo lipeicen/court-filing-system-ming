@@ -200,7 +200,7 @@ def main():
     logger.info("=== 法院自动立案系统启动 ===")
     workflow = FilingWorkflow(headless=settings.BROWSER_HEADLESS)
     try:
-        pending = load_pending_cases(limit=1)
+        pending = load_pending_cases(limit=None)
         if not pending:
             logger.info("没有待立案的案件")
             return
