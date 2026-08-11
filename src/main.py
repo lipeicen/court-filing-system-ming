@@ -205,7 +205,11 @@ def main():
             logger.info("没有待立案的案件")
             return
 
+        supported_courts = set(workflow.adapter_factory.list_supported_courts())
         for case_row in pending:
+            if case_row['court_code'] not in supported_courts:
+                logger.warning(f"跳过不支持的法院代码: {case_row['court_code']} ({case_row['court_name']})")
+                continue
             case_info = case_to_case_info(case_row)
             logger.info(f"处理案件: {case_row['case_no']} -> {case_row['court_name']}")
             logger.info(f"案件信息: {case_info.to_dict()}")
