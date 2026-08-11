@@ -86,7 +86,13 @@ class FilingWorkflow:
                 self._log_step(result, "上传案件材料")
                 adapter.upload_documents(popup, [d.to_dict() for d in case_info.documents])
                 recorder.save_screenshot("documents_uploaded")
-            
+
+            # 进入完善案件信息后填写当事人/标的金额
+            if hasattr(adapter, "fill_party_form"):
+                self._log_step(result, "填写当事人与标的信息")
+                adapter.fill_party_form(popup, case_info.to_dict())
+                recorder.save_screenshot("party_form_filled")
+
             self._log_step(result, "提交立案申请")
             submit_result = adapter.submit_case(popup, case_info.to_dict())
             recorder.save_screenshot("submitted")

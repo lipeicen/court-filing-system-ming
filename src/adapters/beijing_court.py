@@ -534,7 +534,23 @@ class BeijingCourtAdapter(CourtAdapter):
             return False
 
     def _get_active_step_text(self, page: Page) -> str:
-        """获取顶部进度条当前高亮步骤文本"""
+        """获取顶部进度条当前高亮步骤文本（uni-steps 通过蓝色+加粗样式判断）"""
+        try:
+            # 优先匹配 uni-steps 里当前激活步骤：style 含 rgb(0, 150, 255) 且 font-weight: 700
+            result = page.evaluate("""() => {
+                const titles = document.querySelectorAll('.uni-steps__row-title');
+                for (const t of titles) {
+                    const style = t.getAttribute('style') || '';
+                    if (style.includes('rgb(0, 150, 255)') && style.includes('700')) {
+                        return (t.innerText || '').trim();
+                    }
+                }
+                return '';
+            }""")
+            if result:
+                return result
+        except Exception as e:
+            logger.debug(f"_get_active_step_text evaluate failed: {e}")
         try:
             active = page.locator('.fd-com-step-item--active, .fd-step-item--active, .step-item--active, .active').first
             if active.count():
@@ -751,14 +767,14 @@ class BeijingCourtAdapter(CourtAdapter):
                 btn = section.locator('.fd-file-container.fd-btn-add, .fd-btn-add').first
                 for doc_path in existing_paths:
                     try:
-                        with page.expect_event("filechooser", timeout=5000) as fc_info:
-                            btn.click(timeout=3000)
+                        with page.expect_event("filechooser", timeout=10000) as fc_info:
+                            btn.click(timeout=10000)
                         fc = fc_info.value
                         fc.set_files(doc_path)
                         logger.info(f"selected {doc_path} for section {title}")
                     except Exception as e:
                         logger.warning(f"filechooser failed for {title} / {doc_path}: {e}")
-                    self._wait(3)
+                    self._wait(5)
                 # Verify expected file names appear only in this section
                 expected_names = [os.path.basename(p) for p in existing_paths]
                 shown_titles = section.locator('.fd-com-upload-grid-container .fd-file-cursor').evaluate_all(
@@ -790,7 +806,7 @@ class BeijingCourtAdapter(CourtAdapter):
             case_data = getattr(self, '_case_data', {}) or {}
 
         # 1) 标的金额
-        amount = case_data.get("amount", 0)
+        amount = case_data.get("claim_amount", 0)
         try:
             self._fill_party_card_fields(page, {"标的金额（元）": str(amount)})
             logger.info(f"填写标的金额: {amount}")
@@ -1576,7 +1592,11 @@ class BeijingCourtAdapter(CourtAdapter):
             # after selecting signature, document preview is shown; click next to go to preview/submit
             self._click_page_bottom_next(page)
             self._wait(2)
-        return self._has_text(page, '预览和提交') or self._has_text(page, '提交立案')
+        active = self._get_active_step_text(page)
+        ok = active in ('预览和提交', '提交立案')
+        if not ok:
+            logger.warning(f"complete_case_info_and_preview: 当前步骤为 {active!r}，未到达预览和提交")
+        return ok
 
     def _select_signature(self, page: Page) -> bool:
         """选择第一个可用签名并点击引入签章"""
@@ -1612,10 +1632,11 @@ class BeijingCourtAdapter(CourtAdapter):
                 return {"status": "failed", "message": "填写后仍未进入预览和提交页面"}
 
         # 2) 检查是否真的到了预览和提交步骤
-        if not (self._has_text(page, "预览和提交") or self._has_text(page, "提交立案")):
-            logger.warning("未能进入预览和提交步骤")
+        active = self._get_active_step_text(page)
+        if active not in ('预览和提交', '提交立案'):
+            logger.warning(f"未能进入预览和提交步骤，当前步骤: {active!r}")
             self._save_state(page, "not_preview")
-            return {"status": "failed", "message": "填写后仍未进入预览和提交页面"}
+            return {"status": "failed", "message": f"填写后仍未进入预览和提交页面，当前步骤: {active}"}
 
         if dry_run:
             logger.info("dry_run: 已到达预览和提交页面，停止提交")
@@ -1627,14 +1648,12 @@ class BeijingCourtAdapter(CourtAdapter):
         case_id = ""
         message = "已走到预览和提交步骤，但未触发真实提交"
         try:
-            # 3) 尝试点击提交按钮（优先使用 JS，避免自定义元素选择器问题）
-            # 在“预览和提交”页，按钮通常是“下一步”，点击后进入确认弹窗
+            # 3) 在预览和提交页点击提交按钮（只点击真正的提交/确认提交，不点下一步）
             result = page.evaluate("""() => {
                 const btns = document.querySelectorAll('uni-button, button, .uni-modal__btn');
                 for (const b of btns) {
                     const t = (b.innerText || '').trim();
-                    if (t === '提交' || t === '确认提交' || t === '立即提交') { b.click(); return 'clicked ' + t; }
-                    if (t === '下一步') { b.click(); return 'clicked next'; }
+                    if (t === '确认提交' || t === '立即提交' || t === '提交') { b.click(); return 'clicked ' + t; }
                 }
                 return null;
             }""")
